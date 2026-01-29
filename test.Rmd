@@ -1,0 +1,13 @@
+---
+title: "Test"
+output: html_document
+date: "2026-01-29"
+---
+# This .Rmd was created to ensure my Git repo is connected and that I can save, commit, and push 
+```{r}
+cat("Hi!")
+cat("\n")
+cat("Testing...")
+cat("Fingers crossed")
+```
+
