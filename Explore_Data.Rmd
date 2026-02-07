@@ -1,0 +1,156 @@
+---
+title: "Explore_Data"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r LoadLibraries, message = FALSE, error = FALSE}
+# Load in needed libraries
+library(ohdsilab)
+library(DatabaseConnector)
+library(keyring)
+library(dplyr)
+library(keyring)
+library(ROhdsiWebApi)
+library(CohortGenerator)
+```
+
+```{r}
+# Define constants
+atlas_url <- "https://atlas.roux-ohdsi-prod.aws.northeastern.edu/WebAPI"
+cdm_schema <- "omop_cdm_53_pmtx_202203"
+write_schema <- paste0("work_", keyring::key_get("db_username"))
+```
+
+```{r}
+# Define path to JDBC driver
+#Sys.setenv("DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/washburn.e/Downloads/redshift-jdbc42-2.2.2")
+
+# Establish connection to the database
+#con <- ohdsilab_connect(
+    #username = key_get("db_username"),
+    #password = key_get("db_password"))
+
+# See if connection is successful
+#if (isTRUE(DatabaseConnector::dbIsValid(con))) print("Connected Successfully")
+```
+
+```{r}
+# Define path to JDBC driver
+Sys.setenv("DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/washburn.e/Downloads/redshift-jdbc42-2.2.2")
+
+# Establish a connection to the database
+connectionDetails <- createConnectionDetails(
+    dbms = "redshift",
+    server = "ohdsi-lab-redshift-cluster-prod.clsyktjhufn7.us-east-1.redshift.amazonaws.com/ohdsi_lab",
+    port = 5439,
+    user = keyring::key_get("db_username"),
+    password = keyring::key_get("db_password"))
+
+# We do need to connect to the database to save the variable "con", but we can 
+# it with much less code now that we the connectionDetails saved
+con <- DatabaseConnector::connect(connectionDetails)
+
+# See if connection is successful
+if (isTRUE(DatabaseConnector::dbIsValid(con))) print("Connected Successfully")
+```
+```{r}
+# make it easier for some r functions to find the database
+options(con.default.value = con)
+options(schema.default.value = cdm_schema)
+options(write_schema.default.value = write_schema)
+```
+
+```{r}
+# Authorize the API for accessing ATLAS from R 
+ROhdsiWebApi::authorizeWebApi(
+    atlas_url,
+    authMethod = "db",
+    webApiUsername = keyring::key_get("atlas_username"),
+    webApiPassword = keyring::key_get("atlas_password"))
+```
+
+```{r}
+# Define my created cohort ID
+cohortId <- 5276
+
+# Create a cohortDefinitionSet 
+cohortDefinitionSet <- ROhdsiWebApi::exportCohortDefinitionSet(
+    baseUrl = atlas_url,
+    cohortIds = cohortId)
+
+# View cohortDefinitionSet
+cohortDefinitionSet
+```
+
+```{r}
+# Create a name for this cohort
+cohortTableNames <- getCohortTableNames(cohortTable = "EZW_Cohort")
+cohortTableNames
+```
+
+```{r}
+# create empty tables in the {mySchema}.cohort table
+createCohortTables(
+    connectionDetails = connectionDetails,
+    cohortTableNames = cohortTableNames,
+    cohortDatabaseSchema = write_schema)
+```
+
+```{r}
+# add everyone from the database to the cohort
+cohortsGenerated <- generateCohortSet(
+    connectionDetails = connectionDetails,
+    cdmDatabaseSchema = cdm_schema,
+    cohortDatabaseSchema = write_schema,
+    cohortTableNames = cohortTableNames,
+    cohortDefinitionSet = cohortDefinitionSet)
+```
+
+If I want to visually see the new table in my schema, I can connect to the database and use the **Connections** pane in the top right of RStudio: 
+
+con =  DatabaseConnector::connect(
+  dbms = "redshift",
+  server = "ohdsi-lab-redshift-cluster-prod.clsyktjhufn7.us-east-1.redshift.amazonaws.com/ohdsi_lab",
+  port = 5439,
+  user = keyring::key_get("db_username"),
+  password = keyring::key_get("db_password"))
+
+```{r}
+cohort <- tbl(
+    con,
+    inDatabaseSchema(write_schema, "EZW_Cohort")) |>
+    select(person_id = subject_id, cohort_start_date, cohort_end_date)
+
+# Demographics (one row per person)
+demographics <- cohort |> 
+  inner_join(person, by = "person_id") |> 
+  select(person_id, cohort_start_date, cohort_end_date, 
+         year_of_birth, gender_source_value, location_id, care_site_id)
+
+# Conditions (multiple rows per person)
+conditions <- cohort |> 
+  inner_join(condition_occurrence, by = "person_id") |> 
+  select(person_id, condition_occurrence_id, condition_concept_id, 
+         condition_type_concept_id, condition_source_value)
+
+# Drugs (multiple rows per person)
+drugs <- cohort |> 
+  inner_join(drug_exposure, by = "person_id") |> 
+  select(person_id, drug_exposure_id, drug_concept_id, 
+         drug_exposure_start_date, drug_exposure_end_date)
+
+# Payer (multiple rows per person)
+payers <- cohort |> 
+  inner_join(payer_plan_period, by = "person_id") |> 
+  select(person_id, payer_plan_period_id, payer_source_value)
+```
+
+```{r}
+demographics
+conditions
+drugs 
+payers
+```
+
+
