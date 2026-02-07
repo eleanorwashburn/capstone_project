@@ -4,7 +4,7 @@ output: html_document
 date: "2026-01-29"
 ---
 
-```{r LoadLibraries, message = FALSE, error = FALSE}
+```{r LoadLibraries, message = FALSE, warning = FALSE}
 # Load in needed libraries
 library(ohdsilab)
 library(DatabaseConnector)
@@ -105,6 +105,20 @@ cohort <- tbl(
     inDatabaseSchema(write_schema, "EZW_Cohort")) |>
     select(person_id = subject_id, cohort_start_date, cohort_end_date)
 
+
+# Define the 'observation_period' table connection 
+observation_table <- tbl(con, inDatabaseSchema(cdm_schema, "observation_period"))
+
+enrollment <- cohort |> 
+  inner_join(observation_table, by = "person_id") |> 
+  select(
+    person_id,
+    observation_period_start_date,
+    observation_period_end_date,
+    period_type_concept_id)
+```
+
+```{r}
 # Define the 'person' table connection 
 person <- tbl(con, inDatabaseSchema(cdm_schema, "person"))
 
@@ -116,27 +130,13 @@ demographics <- cohort |>
     cohort_start_date,
     cohort_end_date,
     year_of_birth,
-    gender_concept_id,
     gender_source_value,
     location_id)
 
-# Define the 'location' table connection 
-locations <- tbl(con, inDatabaseSchema(cdm_schema, "location"))
+demographics
+```
 
-# Create my demographics with ZIP table 
-demographics_with_zip <- demographics |> 
-  left_join(locations, by = "location_id") |> 
-  select(
-    person_id,
-    cohort_start_date,
-    cohort_end_date,
-    year_of_birth,
-    gender_source_value,
-    address_1,
-    address_2,
-    zip, # Full ZIP or ZIP-3 for ADI/SVI matching
-    state)
-
+```{r}
 # Define the 'condition_occurrence' table connection 
 condition_occurrence <- tbl(con, inDatabaseSchema(cdm_schema, "condition_occurrence"))
 
@@ -144,12 +144,17 @@ conditions <- cohort |>
   inner_join(condition_occurrence, by = "person_id") |> 
   select(person_id,
     condition_occurrence_id,
-    condition_concept_id,  # For diabetes, HTN, dyslipidemia
+    condition_concept_id,  
     condition_start_date,
     condition_end_date,
     condition_type_concept_id,
-    condition_source_value)
+    condition_source_value, 
+    condition_status_source_value)
 
+conditions
+```
+
+```{r}
 # Define the 'drug-exposure' table connection 
 drug_exposure <- tbl(con, inDatabaseSchema(cdm_schema, "drug_exposure"))
 
@@ -164,11 +169,14 @@ drugs <- cohort |>
     drug_type_concept_id,
     quantity,
     days_supply,  # CRITICAL for PDC calculation
-    refills,
     drug_source_value,
-    provider_id  # CRITICAL: Links to provider quality rankings
+    provider_id
   )
 
+drugs
+```
+
+```{r}
 # Define the 'payer_plan_period' table connection 
 payers <- tbl(con, inDatabaseSchema(cdm_schema, "payer_plan_period"))
 
@@ -184,6 +192,10 @@ payer <- cohort |>
     payer_concept_id
   )
 
+payer
+```
+
+```{r}
 # Define the 'provider' table connection 
 providers <- tbl(con, inDatabaseSchema(cdm_schema, "provider"))
 
@@ -193,11 +205,14 @@ drug_providers <- drugs |>
   select(
     person_id,
     provider_id,
-    npi,  # CRITICAL: Match to NPPES
     specialty_concept_id,
     specialty_source_value) |>
   distinct()
 
+drug_providers
+```
+
+```{r}
 # Define the 'visit_occurrence' table connection 
 visits <- tbl(con, inDatabaseSchema(cdm_schema, "visit_occurrence"))
 
@@ -210,9 +225,12 @@ visit_providers <- visits |>
     provider_id,
     specialty_concept_id,
     specialty_source_value
-  ) |>
-  distinct()
+  ) 
 
+visit_providers
+```
+
+```{r}
 visit <- cohort |> 
   inner_join(visits, by = "person_id") |> 
   select(
@@ -222,30 +240,8 @@ visit <- cohort |>
     visit_start_date,
     visit_end_date,
     visit_type_concept_id,
-    care_site_id,
     provider_id)
 
-# Define the 'observation_period' table connection 
-observation_table <- tbl(con, inDatabaseSchema(cdm_schema, "observation_period"))
-
-enrollment <- cohort |> 
-  inner_join(observation_table, by = "person_id") |> 
-  select(
-    person_id,
-    observation_period_start_date,
-    observation_period_end_date,
-    period_type_concept_id)
-```
-
-```{r}
-demographics
-demographics_with_zip
-conditions
-drugs 
-payer
-drug_providers
-visit_providers
 visit
-enrollment
 ```
 
