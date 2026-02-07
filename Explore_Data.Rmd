@@ -24,19 +24,6 @@ write_schema <- paste0("work_", keyring::key_get("db_username"))
 
 ```{r}
 # Define path to JDBC driver
-#Sys.setenv("DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/washburn.e/Downloads/redshift-jdbc42-2.2.2")
-
-# Establish connection to the database
-#con <- ohdsilab_connect(
-    #username = key_get("db_username"),
-    #password = key_get("db_password"))
-
-# See if connection is successful
-#if (isTRUE(DatabaseConnector::dbIsValid(con))) print("Connected Successfully")
-```
-
-```{r}
-# Define path to JDBC driver
 Sys.setenv("DATABASECONNECTOR_JAR_FOLDER" = "D:/Users/washburn.e/Downloads/redshift-jdbc42-2.2.2")
 
 # Establish a connection to the database
@@ -47,15 +34,14 @@ connectionDetails <- createConnectionDetails(
     user = keyring::key_get("db_username"),
     password = keyring::key_get("db_password"))
 
-# We do need to connect to the database to save the variable "con", but we can 
-# it with much less code now that we the connectionDetails saved
+# Connect to the database to save the variable "con"
 con <- DatabaseConnector::connect(connectionDetails)
 
 # See if connection is successful
 if (isTRUE(DatabaseConnector::dbIsValid(con))) print("Connected Successfully")
 ```
 ```{r}
-# make it easier for some r functions to find the database
+# Make it easier for some r functions to find the database
 options(con.default.value = con)
 options(schema.default.value = cdm_schema)
 options(write_schema.default.value = write_schema)
@@ -78,19 +64,15 @@ cohortId <- 5276
 cohortDefinitionSet <- ROhdsiWebApi::exportCohortDefinitionSet(
     baseUrl = atlas_url,
     cohortIds = cohortId)
-
-# View cohortDefinitionSet
-cohortDefinitionSet
 ```
 
 ```{r}
 # Create a name for this cohort
 cohortTableNames <- getCohortTableNames(cohortTable = "EZW_Cohort")
-cohortTableNames
 ```
 
 ```{r}
-# create empty tables in the {mySchema}.cohort table
+# Create empty tables in the {mySchema}.cohort table
 createCohortTables(
     connectionDetails = connectionDetails,
     cohortTableNames = cohortTableNames,
@@ -98,7 +80,7 @@ createCohortTables(
 ```
 
 ```{r}
-# add everyone from the database to the cohort
+# Add everyone from the database to the cohort
 cohortsGenerated <- generateCohortSet(
     connectionDetails = connectionDetails,
     cdmDatabaseSchema = cdm_schema,
@@ -117,40 +99,153 @@ con =  DatabaseConnector::connect(
   password = keyring::key_get("db_password"))
 
 ```{r}
+# Create my cohort table 
 cohort <- tbl(
     con,
     inDatabaseSchema(write_schema, "EZW_Cohort")) |>
     select(person_id = subject_id, cohort_start_date, cohort_end_date)
 
-# Demographics (one row per person)
+# Define the 'person' table connection 
+person <- tbl(con, inDatabaseSchema(cdm_schema, "person"))
+
+# Create my demographics table 
 demographics <- cohort |> 
   inner_join(person, by = "person_id") |> 
-  select(person_id, cohort_start_date, cohort_end_date, 
-         year_of_birth, gender_source_value, location_id, care_site_id)
+  select(
+    person_id,
+    cohort_start_date,
+    cohort_end_date,
+    year_of_birth,
+    gender_concept_id,
+    gender_source_value,
+    location_id)
 
-# Conditions (multiple rows per person)
+# Define the 'location' table connection 
+locations <- tbl(con, inDatabaseSchema(cdm_schema, "location"))
+
+# Create my demographics with ZIP table 
+demographics_with_zip <- demographics |> 
+  left_join(locations, by = "location_id") |> 
+  select(
+    person_id,
+    cohort_start_date,
+    cohort_end_date,
+    year_of_birth,
+    gender_source_value,
+    address_1,
+    address_2,
+    zip, # Full ZIP or ZIP-3 for ADI/SVI matching
+    state)
+
+# Define the 'condition_occurrence' table connection 
+condition_occurrence <- tbl(con, inDatabaseSchema(cdm_schema, "condition_occurrence"))
+
 conditions <- cohort |> 
   inner_join(condition_occurrence, by = "person_id") |> 
-  select(person_id, condition_occurrence_id, condition_concept_id, 
-         condition_type_concept_id, condition_source_value)
+  select(person_id,
+    condition_occurrence_id,
+    condition_concept_id,  # For diabetes, HTN, dyslipidemia
+    condition_start_date,
+    condition_end_date,
+    condition_type_concept_id,
+    condition_source_value)
 
-# Drugs (multiple rows per person)
+# Define the 'drug-exposure' table connection 
+drug_exposure <- tbl(con, inDatabaseSchema(cdm_schema, "drug_exposure"))
+
 drugs <- cohort |> 
   inner_join(drug_exposure, by = "person_id") |> 
-  select(person_id, drug_exposure_id, drug_concept_id, 
-         drug_exposure_start_date, drug_exposure_end_date)
+  select(
+    person_id,
+    drug_exposure_id,
+    drug_concept_id,
+    drug_exposure_start_date,
+    drug_exposure_end_date,
+    drug_type_concept_id,
+    quantity,
+    days_supply,  # CRITICAL for PDC calculation
+    refills,
+    drug_source_value,
+    provider_id  # CRITICAL: Links to provider quality rankings
+  )
 
-# Payer (multiple rows per person)
-payers <- cohort |> 
-  inner_join(payer_plan_period, by = "person_id") |> 
-  select(person_id, payer_plan_period_id, payer_source_value)
+# Define the 'payer_plan_period' table connection 
+payers <- tbl(con, inDatabaseSchema(cdm_schema, "payer_plan_period"))
+
+payer <- cohort |> 
+  inner_join(payers, by = "person_id") |> 
+  select(
+    person_id,
+    payer_plan_period_id,
+    payer_plan_period_start_date,
+    payer_plan_period_end_date,
+    payer_source_value,  # Commercial, HMO, PPO
+    plan_source_value,  # High deductible vs traditional
+    payer_concept_id
+  )
+
+# Define the 'provider' table connection 
+providers <- tbl(con, inDatabaseSchema(cdm_schema, "provider"))
+
+drug_providers <- drugs |> 
+  filter(!is.na(provider_id)) |>
+  inner_join(providers, by = "provider_id") |> 
+  select(
+    person_id,
+    provider_id,
+    npi,  # CRITICAL: Match to NPPES
+    specialty_concept_id,
+    specialty_source_value) |>
+  distinct()
+
+# Define the 'visit_occurrence' table connection 
+visits <- tbl(con, inDatabaseSchema(cdm_schema, "visit_occurrence"))
+
+# Get providers from visits (attributed providers)
+visit_providers <- visits |> 
+  filter(!is.na(provider_id)) |>
+  inner_join(providers, by = "provider_id") |> 
+  select(
+    person_id,
+    provider_id,
+    specialty_concept_id,
+    specialty_source_value
+  ) |>
+  distinct()
+
+visit <- cohort |> 
+  inner_join(visits, by = "person_id") |> 
+  select(
+    person_id,
+    visit_occurrence_id,
+    visit_concept_id,  # Outpatient, ER, inpatient
+    visit_start_date,
+    visit_end_date,
+    visit_type_concept_id,
+    care_site_id,
+    provider_id)
+
+# Define the 'observation_period' table connection 
+observation_table <- tbl(con, inDatabaseSchema(cdm_schema, "observation_period"))
+
+enrollment <- cohort |> 
+  inner_join(observation_table, by = "person_id") |> 
+  select(
+    person_id,
+    observation_period_start_date,
+    observation_period_end_date,
+    period_type_concept_id)
 ```
 
 ```{r}
 demographics
+demographics_with_zip
 conditions
 drugs 
-payers
+payer
+drug_providers
+visit_providers
+visit
+enrollment
 ```
-
 
